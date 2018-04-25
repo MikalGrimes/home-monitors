@@ -54,7 +54,6 @@ def log_metric(location, metric_name, metric_value):
         ]
     )
 
-    print response
 
 temp_f = read_temp()['f']
 print(str(datetime.datetime.now()) + " Logging temperature: " + str(temp_f))
