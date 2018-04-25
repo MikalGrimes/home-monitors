@@ -56,5 +56,5 @@ def log_metric(location, metric_name, metric_value):
     print response
 
 temp_f = read_temp()['f']
-print("Logging temperature: " + temp_f)
+print("Logging temperature: " + str(temp_f))
 log_metric("garage/wine-fridge", "temperature", temp_f)
