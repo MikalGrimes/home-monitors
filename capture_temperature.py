@@ -2,6 +2,7 @@ import boto3
 import os
 import glob
 import time
+import datetime
  
 os.system('modprobe w1-gpio')
 os.system('modprobe w1-therm')
@@ -56,5 +57,5 @@ def log_metric(location, metric_name, metric_value):
     print response
 
 temp_f = read_temp()['f']
-print("Logging temperature: " + str(temp_f))
+print(str(datetime.datetime.now()) + " Logging temperature: " + str(temp_f))
 log_metric("garage/wine-fridge", "temperature", temp_f)
