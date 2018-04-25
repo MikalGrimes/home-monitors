@@ -1,10 +1,11 @@
 import boto3
 import os
 import glob
-from datetime import datetime
+import time
  
 os.system('modprobe w1-gpio')
 os.system('modprobe w1-therm')
+
  
 def read_temp_raw():
     base_dir = '/sys/bus/w1/devices/'
@@ -15,7 +16,8 @@ def read_temp_raw():
     lines = f.readlines()
     f.close()
     return lines
- 
+
+
 def read_temp():
     lines = read_temp_raw()
     while lines[0].strip()[-3:] != 'YES':
@@ -27,21 +29,31 @@ def read_temp():
         temp_c = float(temp_string) / 1000.0
         temp_f = temp_c * 9.0 / 5.0 + 32.0
         return temp_c, temp_f
-        
-def log_metric(metric_name, metric_value):
+
+
+def log_metric(location, metric_name, metric_value):
     session = boto3.Session(profile_name='bg')
     client = session.client('cloudwatch')
     
     response = client.put_metric_data(
-        Namespace='bghouse/home-monitors',
+        Namespace='bghouse',
         MetricData=[
             {
                 'MetricName': metric_name,
-                'Timestamp': datetime.now(),
+                'Dimensions': [
+                    {
+                        'Name': 'location',
+                        'Value': location
+                    }
+                ],
+                'Timestamp': int(time.time()),
                 'Value': metric_value,
                 'Unit': 'None'
             },
         ]
     )
+
+    print response
+
     
-log_metric("ignore_me", 42.0)
+log_metric("garage/wine-fridge", "temperature", 42.0)
