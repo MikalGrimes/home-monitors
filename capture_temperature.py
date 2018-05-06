@@ -3,6 +3,7 @@ import os
 import glob
 import time
 import datetime
+import sys
  
 os.system('modprobe w1-gpio')
 os.system('modprobe w1-therm')
@@ -36,7 +37,7 @@ def log_metric(location, metric_name, metric_value):
     session = boto3.Session(profile_name='bg')
     client = session.client('cloudwatch')
     
-    response = client.put_metric_data(
+    client.put_metric_data(
         Namespace='bghouse',
         MetricData=[
             {
@@ -55,6 +56,13 @@ def log_metric(location, metric_name, metric_value):
     )
 
 
+# values from command line:
+cloudwatch_dimension = sys.argv[1]
+cloudwatch_metric_name = sys.argv[2]
+
+# capture a temperature reading:
 temp_f = read_temp()['f']
-print(str(datetime.datetime.now()) + " Logging temperature: " + str(temp_f))
-log_metric("garage/wine-fridge", "temperature", temp_f)
+print(str(datetime.datetime.now()) + " Logging {0}: {1}", cloudwatch_metric_name, str(temp_f))
+
+# send the value to AWS cloudwatch:
+log_metric(cloudwatch_dimension, cloudwatch_metric_name, temp_f)
