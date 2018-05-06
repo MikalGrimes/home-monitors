@@ -62,7 +62,7 @@ cloudwatch_metric_name = sys.argv[2]
 
 # capture a temperature reading:
 temp_f = read_temp()['f']
-print(str(datetime.datetime.now()) + " Logging {0}: {1}", cloudwatch_metric_name, str(temp_f))
+print("{0} Logging {1}: {2}".format(str(datetime.datetime.now()), cloudwatch_metric_name, str(temp_f)))
 
 # send the value to AWS cloudwatch:
 log_metric(cloudwatch_dimension, cloudwatch_metric_name, temp_f)
