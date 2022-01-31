@@ -1,2 +1,2 @@
 # home-monitors
-Hi, this will house source code for my raspberry pi temperature monitor to AWS Cloudwatch Metrics
+Raspberry pi temperature monitor that writes to AWS Cloudwatch Metrics
