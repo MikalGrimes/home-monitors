@@ -2,7 +2,7 @@
   "title": "Home temperatures",
   "dataBase": "../monitors-data",
   "series": [
-    { "slug": "rpi03-temperature", "label": "Inside (rpi03)" },
+    { "slug": "rpi03-temperature", "label": "Garage (rpi03 \"attic\")" },
     { "slug": "austin-78705", "label": "Austin outdoor" }
   ]
 }

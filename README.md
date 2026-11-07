@@ -33,8 +33,15 @@ data directory with `HOME_MONITORS_DATA`, set once at the top of the crontab:
     */5 * * * * cd ~/code/home-monitors && python3 capture_temperature.py rpi03-temperature
     */5 * * * * cd ~/code/home-monitors && python3 capture_outdoor.py austin-78705 30.298 -97.742
 
-systemd `ExecStart=/usr/bin/python3 /home/pi/code/home-monitors/deploy/server.py` (add `--pages`,
-`--monitors`, `--data` or `--port` to override the defaults). Then browse to `http://<pi>:8080/monitors/`.
+Target platform is a Pi Zero W on Raspbian Stretch with Python 3.5, so the scripts avoid newer Python features.
+
+systemd (replaces `/home/pi/serve.py` in the `pool-page` service; `WorkingDirectory` no longer matters):
+
+    ExecStart=/bin/sh -c 'exec /usr/bin/python3 -u /home/pi/code/home-monitors/deploy/server.py >> /var/log/pool-page.log 2>&1'
+
+then `sudo systemctl daemon-reload && sudo systemctl restart pool-page`. Add `--pages`, `--monitors`,
+`--data` or `--port` to override the defaults. Browse to `http://<pi>:8080/monitors/`; the pool page keeps
+its existing URL. Dot-files and dot-folders (such as `.git`) are never served.
 
 Try it without a Pi: `python3 tools/make_sample_data.py /tmp/sample` then
 `python3 deploy/server.py --pages . --monitors web --data /tmp/sample` and open `http://localhost:8080/monitors/`.

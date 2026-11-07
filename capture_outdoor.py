@@ -22,7 +22,7 @@ def fetch_temp_f(lat, lon):
         "temperature_unit": "fahrenheit",
     })
     with urllib.request.urlopen(URL + "?" + query, timeout=20) as resp:
-        return float(json.load(resp)["current"]["temperature_2m"])
+        return float(json.loads(resp.read().decode("utf-8"))["current"]["temperature_2m"])  # 3.5-safe
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""Tiny static file server for the Pi (run it from systemd).
+"""Tiny static file server for the Pi (run it from systemd). Works on Python 3.5.
 
 Only three directories are reachable, so the repos' .git folders and source stay private:
 
@@ -12,23 +12,38 @@ import argparse
 import functools
 import http.server
 import os
+import posixpath
 import socketserver
 import urllib.parse
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    mounts = {}                            # "/prefix" -> directory, filled in by main()
+    def __init__(self, *args, root, mounts, **kwargs):
+        self.root = root
+        self.mounts = mounts               # {"monitors": dir, "monitors-data": dir}
+        super().__init__(*args, **kwargs)
 
     def address_string(self):
         return self.client_address[0]      # no reverse DNS lookup
 
     def translate_path(self, path):
-        clean = urllib.parse.unquote(urllib.parse.urlsplit(path).path)
-        for prefix, directory in self.mounts.items():
-            if clean == prefix or clean.startswith(prefix + "/"):
-                self.directory = directory          # a handler instance serves one request
-                return super().translate_path(clean[len(prefix):] or "/")
-        return super().translate_path(path)
+        # Same job as the stdlib version (which on 3.5 can only serve the current directory),
+        # but the first path segment may select a different base directory.
+        path = path.split("?", 1)[0].split("#", 1)[0]
+        trailing_slash = path.rstrip().endswith("/")
+        words = [w for w in posixpath.normpath(urllib.parse.unquote(path)).split("/") if w]
+        base = self.root
+        if words and words[0] in self.mounts:
+            base = self.mounts[words[0]]
+            words = words[1:]
+        result = base
+        for w in words:
+            if w.startswith("."):
+                return os.path.join(base, "no-such-file")   # hide .git and other dot files (404)
+            if os.path.dirname(w):
+                continue                   # never let a segment climb out of its base
+            result = os.path.join(result, w)
+        return result + "/" if trailing_slash else result
 
     def end_headers(self):
         # Revalidate on every load: unchanged files come back as a cheap 304,
@@ -50,12 +65,12 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     a = ap.parse_args()
 
-    Handler.mounts = {
-        "/monitors": os.path.abspath(os.path.expanduser(a.monitors)),
-        "/monitors-data": os.path.abspath(os.path.expanduser(a.data)),
-    }
-    root = os.path.abspath(os.path.expanduser(a.pages))
-    Server(("", a.port), functools.partial(Handler, directory=root)).serve_forever()
+    def full(p):
+        return os.path.abspath(os.path.expanduser(p))
+
+    handler = functools.partial(Handler, root=full(a.pages),
+                                mounts={"monitors": full(a.monitors), "monitors-data": full(a.data)})
+    Server(("", a.port), handler).serve_forever()
 
 
 if __name__ == "__main__":
