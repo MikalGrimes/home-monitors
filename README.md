@@ -6,10 +6,11 @@ Raspberry Pi temperature monitor. Readings are appended to monthly CSV files
 
 Crontab (every 5 minutes; use python3):
 
-    */5 * * * * python3 ~/home-monitors/capture_temperature.py rpi03-temperature
-    */5 * * * * python3 ~/home-monitors/capture_outdoor.py austin-78705 30.298 -97.742
+    HOME_MONITORS_DATA=/home/pi/data/home-monitors
+    */5 * * * * cd ~/code/home-monitors && python3 capture_temperature.py rpi03-temperature
+    */5 * * * * cd ~/code/home-monitors && python3 capture_outdoor.py austin-78705 30.298 -97.742
 
-Set `HOME_MONITORS_DATA` to store data somewhere other than `./data`.
+`HOME_MONITORS_DATA` is where data is stored (default: `./data` next to the scripts).
 Outdoor temperature comes from [Open-Meteo](https://open-meteo.com) (free for non-commercial use, no key).
 
 ## Web page
@@ -18,12 +19,22 @@ Outdoor temperature comes from [Open-Meteo](https://open-meteo.com) (free for no
 drag to zoom, hover for values). It reads `web/config.json` (copy to `web/config.local.json` to
 customize per Pi without touching git) and loads only the month files it needs.
 
-`deploy/server.py` is the small static server run by systemd. Serve it from `~/pages` and link in:
+`deploy/server.py` is the small static server run by systemd. It maps three URL prefixes to
+directories, so nothing else (including the repos' `.git` folders) is reachable:
 
-    ln -s ~/home-monitors/web  ~/pages/monitors
-    ln -s ~/home-monitors/data ~/pages/monitors-data
+    /                -> ~/code/pages              (pool controller site)
+    /monitors/       -> ~/code/home-monitors/web  (this page)
+    /monitors-data/  -> ~/data/home-monitors      (readings written by the capture scripts)
 
-then browse to `http://<pi>:8080/monitors/`.
+Pi layout: repos in `~/code/`, readings in `~/data/home-monitors/`. Point the capture scripts at the
+data directory with `HOME_MONITORS_DATA`, set once at the top of the crontab:
 
-Try it without a Pi: `python3 tools/make_sample_data.py /tmp/site/data` and serve `/tmp/site`
-with the same two links.
+    HOME_MONITORS_DATA=/home/pi/data/home-monitors
+    */5 * * * * cd ~/code/home-monitors && python3 capture_temperature.py rpi03-temperature
+    */5 * * * * cd ~/code/home-monitors && python3 capture_outdoor.py austin-78705 30.298 -97.742
+
+systemd `ExecStart=/usr/bin/python3 /home/pi/code/home-monitors/deploy/server.py` (add `--pages`,
+`--monitors`, `--data` or `--port` to override the defaults). Then browse to `http://<pi>:8080/monitors/`.
+
+Try it without a Pi: `python3 tools/make_sample_data.py /tmp/sample` then
+`python3 deploy/server.py --pages . --monitors web --data /tmp/sample` and open `http://localhost:8080/monitors/`.
