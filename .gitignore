@@ -99,3 +99,7 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# Local data and per-Pi page config
+/data/
+/web/config.local.json

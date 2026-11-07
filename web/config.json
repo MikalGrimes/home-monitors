@@ -1,0 +1,8 @@
+{
+  "title": "Home temperatures",
+  "dataBase": "../monitors-data",
+  "series": [
+    { "slug": "rpi03-temperature", "label": "Inside (rpi03)" },
+    { "slug": "austin-78705", "label": "Austin outdoor" }
+  ]
+}

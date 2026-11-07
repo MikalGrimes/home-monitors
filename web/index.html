@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home temperatures</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1c1f23; --muted: #667085; --grid: #e4e7ec; --panel: #f4f5f7;
+    --sel: rgba(42, 120, 214, .15);
+    --c0: #2a78d6; --c1: #d9730d; --c2: #2f9e6b; --c3: #a64dc4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --fg: #e6e8eb; --muted: #9aa3ad; --grid: #2a2f35; --panel: #1d2126;
+      --sel: rgba(90, 162, 255, .2);
+      --c0: #5aa2ff; --c1: #ffa040; --c2: #4cc790; --c3: #d18af0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+  .card { appearance: none; border: 1px solid var(--grid); background: var(--panel); color: inherit;
+          border-radius: 10px; padding: 10px 14px; min-width: 150px; text-align: left; cursor: pointer; font: inherit; }
+  .card .name { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .card .swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+  .card .val { font-size: 28px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .card .age { font-size: 12px; color: var(--muted); }
+  .card.stale .age { color: #d92d20; font-weight: 600; }
+  .card[aria-pressed="false"] { opacity: .45; }
+  .card[aria-pressed="false"] .swatch { background: transparent; border: 1.5px solid var(--c); }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  nav button { appearance: none; border: 1px solid var(--grid); background: transparent; color: inherit;
+               border-radius: 8px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  nav button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  #wrap { position: relative; height: clamp(280px, 58vh, 540px); }
+  #chart { width: 100%; height: 100%; display: block; touch-action: pan-y; cursor: crosshair; }
+  #tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--grid);
+         border-radius: 8px; padding: 6px 10px; font-size: 13px; white-space: nowrap;
+         box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 2; }
+  #tip .t { color: var(--muted); margin-bottom: 2px; }
+  #tip .row { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+  #tip .swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  #msg { margin: 8px 0 0; min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Home temperatures</h1>
+    <span class="muted" id="tz"></span>
+  </header>
+  <section class="cards" id="latest" aria-label="Latest readings"></section>
+  <nav id="ranges" aria-label="Time range"></nav>
+  <div id="wrap">
+    <canvas id="chart" role="img" aria-label="Temperature history chart"></canvas>
+    <div id="tip" hidden></div>
+  </div>
+  <p class="muted" id="msg"></p>
+  <p class="muted">Drag on the chart to zoom in. Double-click to reset. Click a reading above to hide or show it.</p>
+</main>
+
+<script>
+(() => {
+'use strict';
+
+const DAY = 864e5;
+const PRESETS = [['1d', DAY], ['7d', 7 * DAY], ['30d', 30 * DAY], ['90d', 90 * DAY], ['1y', 365 * DAY], ['All', null]];
+const DEFAULT_PRESET = '7d';
+const GAP_MS = 30 * 60e3;          // break the line when readings are further apart than this
+const STALE_MS = 20 * 60e3;        // flag a series whose newest reading is older than this
+const REFRESH_MS = 2 * 60e3;
+const MARGIN = { l: 50, r: 14, t: 12, b: 28 };
+const EMPTY = { t: new Float64Array(0), v: new Float32Array(0) };
+
+const $ = (sel) => document.querySelector(sel);
+const pad2 = (n) => String(n).padStart(2, '0');
+
+let cfg = null;
+let series = [];                    // [{slug, label, hidden, t, v}]
+const monthCache = new Map();       // "slug/YYYY-MM" -> {t, v}
+const view = { t0: 0, t1: 0, base: DEFAULT_PRESET, live: true };
+let earliest = null;
+let hover = null;                   // pixel x of the pointer, or null
+let drag = null;                    // {x0, x1}
+let plot = { x: 0, y: 0, w: 1, h: 1 };
+
+// ---------- data loading ----------
+
+function parseCsv(text) {
+  const ts = [], vs = [];
+  for (const line of text.split('\n')) {
+    const c = line.charCodeAt(0);
+    if (!(c >= 48 && c <= 57)) continue;                 // skips the header and blank lines
+    const i = line.indexOf(',');
+    const t = Date.parse(line.slice(0, i));
+    const v = parseFloat(line.slice(i + 1));
+    if (Number.isFinite(t) && Number.isFinite(v)) { ts.push(t); vs.push(v); }
+  }
+  return { t: Float64Array.from(ts), v: Float32Array.from(vs) };
+}
+
+function isCurrentMonth(y, m) {
+  const n = new Date();
+  return y === n.getUTCFullYear() && m === n.getUTCMonth() + 1;
+}
+
+async function loadMonth(slug, y, m, force) {
+  const key = `${slug}/${y}-${pad2(m)}`;
+  const hit = monthCache.get(key);
+  if (hit && !(force && isCurrentMonth(y, m))) return hit;
+  try {
+    const r = await fetch(`${cfg.dataBase}/${key}.csv`, { cache: 'no-cache' });
+    if (r.status === 404) { monthCache.set(key, EMPTY); return EMPTY; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = parseCsv(await r.text());
+    monthCache.set(key, d);
+    return d;
+  } catch (e) {
+    console.warn('load failed', key, e);
+    return hit || EMPTY;                                  // not cached, so a later refresh retries
+  }
+}
+
+function monthsBetween(t0, t1) {
+  const out = [];
+  const a = new Date(t0), b = new Date(t1);
+  let y = a.getUTCFullYear(), m = a.getUTCMonth() + 1;
+  const ey = b.getUTCFullYear(), em = b.getUTCMonth() + 1;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push([y, m]);
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+
+async function ensureLoaded(t0, t1, force) {
+  const jobs = [];
+  for (const [y, m] of monthsBetween(t0, t1)) {
+    for (const s of series) jobs.push(loadMonth(s.slug, y, m, force));
+  }
+  await Promise.all(jobs);
+  rebuild();
+}
+
+// Find the oldest month that has data, probing backward in batches of six months.
+async function findEarliest() {
+  if (earliest !== null) return earliest;
+  const now = new Date();
+  let y = now.getUTCFullYear(), m = now.getUTCMonth() + 1;
+  let best = Date.now();
+  for (let batch = 0; batch < 50; batch++) {
+    const jobs = [];
+    for (let i = 0; i < 6; i++) {
+      for (const s of series) jobs.push(loadMonth(s.slug, y, m));
+      if (--m === 0) { m = 12; y--; }
+    }
+    let any = false;
+    for (const d of await Promise.all(jobs)) {
+      if (d.t.length) { any = true; best = Math.min(best, d.t[0]); }
+    }
+    if (!any && batch > 0) break;
+  }
+  earliest = best;
+  return best;
+}
+
+function rebuild() {
+  for (const s of series) {
+    const keys = [...monthCache.keys()].filter((k) => k.startsWith(s.slug + '/')).sort();
+    let n = 0;
+    for (const k of keys) n += monthCache.get(k).t.length;
+    const t = new Float64Array(n), v = new Float32Array(n);
+    let o = 0;
+    for (const k of keys) {
+      const d = monthCache.get(k);
+      t.set(d.t, o); v.set(d.v, o); o += d.t.length;
+    }
+    s.t = t; s.v = v;
+  }
+}
+
+// ---------- view control ----------
+
+async function setPreset(name) {
+  view.base = name;
+  view.live = true;
+  const now = Date.now();
+  if (name === 'All') {
+    view.t0 = await findEarliest();
+  } else {
+    view.t0 = now - PRESETS.find((p) => p[0] === name)[1];
+  }
+  view.t1 = now;
+  await ensureLoaded(view.t0, view.t1);
+  syncUi();
+  draw();
+}
+
+async function refresh() {
+  const now = Date.now();
+  await ensureLoaded(now, now, true);                     // reload only the current month
+  if (view.live) {
+    const span = view.t1 - view.t0;
+    view.t1 = now;
+    if (view.base !== 'All') view.t0 = now - span;
+  }
+  updateLatest();
+  draw();
+}
+
+function syncUi() {
+  for (const b of document.querySelectorAll('#ranges button[data-p]')) {
+    b.setAttribute('aria-pressed', String(view.live && b.dataset.p === view.base));
+  }
+  $('#reset').hidden = view.live;
+  const any = series.some((s) => s.t && s.t.length);
+  $('#msg').textContent = any ? '' : 'No data found yet. Check that the capture scripts are running and the data folder is being served.';
+  updateLatest();
+}
+
+// ---------- latest-reading cards ----------
+
+function ago(ms) {
+  const m = Math.round(ms / 60e3);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + ' min ago';
+  const h = Math.round(m / 60);
+  if (h < 48) return h + ' h ago';
+  return Math.round(h / 24) + ' d ago';
+}
+
+function buildCards() {
+  const box = $('#latest');
+  box.textContent = '';
+  series.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'card';
+    b.style.setProperty('--c', `var(--c${i % 4})`);
+    b.setAttribute('aria-pressed', 'true');
+    b.innerHTML = '<span class="name"><span class="swatch"></span><span class="lbl"></span></span>' +
+                  '<div class="val">–</div><div class="age"></div>';
+    b.querySelector('.lbl').textContent = s.label;
+    b.addEventListener('click', () => {
+      s.hidden = !s.hidden;
+      b.setAttribute('aria-pressed', String(!s.hidden));
+      draw();
+    });
+    s.card = b;
+    box.appendChild(b);
+  });
+}
+
+function updateLatest() {
+  for (const s of series) {
+    const n = s.t ? s.t.length : 0;
+    const val = s.card.querySelector('.val'), age = s.card.querySelector('.age');
+    if (!n) { val.textContent = '–'; age.textContent = 'no data'; s.card.classList.remove('stale'); continue; }
+    const delta = Date.now() - s.t[n - 1];
+    val.textContent = s.v[n - 1].toFixed(1) + '°F';
+    age.textContent = ago(delta);
+    s.card.classList.toggle('stale', delta > STALE_MS);
+  }
+}
+
+// ---------- chart ----------
+
+function lowerBound(arr, x) {          // first index with arr[i] >= x
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function upperBound(arr, x) {          // first index with arr[i] > x
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+
+// Local-time tick marks. Steps below one day are aligned to local clock time;
+// longer steps are aligned to local midnight, the 1st of the month, etc.
+function xTicks(t0, t1, maxTicks) {
+  const span = t1 - t0;
+  const MIN = 60e3, HR = 3600e3;
+  const clock = [1, 2, 5, 10, 15, 30].map((m) => m * MIN).concat([1, 2, 3, 6, 12].map((h) => h * HR));
+  const days = [1, 2, 7, 14];
+  const months = [1, 3, 6, 12];
+  const ticks = [];
+  const offMs = (t) => -new Date(t).getTimezoneOffset() * MIN;
+
+  for (const step of clock) {
+    if (span / step <= maxTicks) {
+      let lt = Math.ceil((t0 + offMs(t0)) / step) * step;
+      for (; ; lt += step) {
+        const t = lt - offMs(lt);
+        if (t > t1) break;
+        const d = new Date(t);
+        const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+        ticks.push({ t, label: midnight ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+                                        : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), major: midnight });
+      }
+      return ticks;
+    }
+  }
+  for (const k of days) {
+    if (span / (k * DAY) <= maxTicks) {
+      const d = new Date(t0); d.setHours(0, 0, 0, 0);
+      if (d.getTime() < t0) d.setDate(d.getDate() + 1);
+      for (; d.getTime() <= t1; d.setDate(d.getDate() + k)) {
+        ticks.push({ t: d.getTime(), label: d.toLocaleDateString([], { month: 'short', day: 'numeric' }), major: d.getDate() === 1 });
+      }
+      return ticks;
+    }
+  }
+  let k = months[months.length - 1];
+  for (const c of months) if (span / (c * 30.4 * DAY) <= maxTicks) { k = c; break; }
+  const d = new Date(t0); d.setHours(0, 0, 0, 0); d.setDate(1);
+  d.setMonth(d.getMonth() - (d.getMonth() % k));
+  while (d.getTime() < t0) d.setMonth(d.getMonth() + k);
+  for (; d.getTime() <= t1; d.setMonth(d.getMonth() + k)) {
+    ticks.push({ t: d.getTime(), label: d.toLocaleDateString([], { month: 'short', year: 'numeric' }), major: d.getMonth() === 0 });
+  }
+  return ticks;
+}
+
+function draw() {
+  const cv = $('#chart');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const css = getComputedStyle(document.documentElement);
+  const cMuted = css.getPropertyValue('--muted').trim();
+  const cGrid = css.getPropertyValue('--grid').trim();
+  const cSel = css.getPropertyValue('--sel').trim();
+
+  const pw = W - MARGIN.l - MARGIN.r, ph = H - MARGIN.t - MARGIN.b;
+  plot = { x: MARGIN.l, y: MARGIN.t, w: pw, h: ph };
+  const { t0, t1 } = view;
+  const xOf = (t) => plot.x + (t - t0) / (t1 - t0) * pw;
+
+  // visible index range per series and the y extent of what's inside the window
+  let lo = Infinity, hi = -Infinity;
+  for (const s of series) {
+    s.range = null;
+    if (s.hidden || !s.t || !s.t.length) continue;
+    const a = lowerBound(s.t, t0), b = upperBound(s.t, t1);
+    for (let i = a; i < b; i++) { const v = s.v[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    s.range = [Math.max(0, a - 1), Math.min(s.t.length, b + 1)];
+  }
+
+  g.font = '12px system-ui, sans-serif';
+  g.fillStyle = cMuted; g.strokeStyle = cGrid; g.lineWidth = 1;
+
+  // x axis
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  for (const tk of xTicks(t0, t1, Math.max(2, Math.floor(pw / 80)))) {
+    const x = Math.round(xOf(tk.t)) + .5;
+    if (x < plot.x || x > plot.x + pw) continue;
+    g.beginPath(); g.moveTo(x, plot.y); g.lineTo(x, plot.y + ph); g.globalAlpha = tk.major ? 1 : .5; g.stroke(); g.globalAlpha = 1;
+    g.fillText(tk.label, x, plot.y + ph + 8);
+  }
+
+  if (!(lo <= hi)) {
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('No readings in this time range', plot.x + pw / 2, plot.y + ph / 2);
+    return;
+  }
+
+  // y axis
+  if (hi - lo < 2) { const mid = (hi + lo) / 2; lo = mid - 1; hi = mid + 1; }
+  const padY = (hi - lo) * .06;
+  const ymin = lo - padY, ymax = hi + padY;
+  const yOf = (v) => plot.y + ph - (v - ymin) / (ymax - ymin) * ph;
+  const step = niceStep((ymax - ymin) / 6);
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let v = Math.ceil(ymin / step) * step; v <= ymax; v += step) {
+    const y = Math.round(yOf(v)) + .5;
+    g.beginPath(); g.moveTo(plot.x, y); g.lineTo(plot.x + pw, y); g.stroke();
+    g.fillText((step < 1 ? v.toFixed(1) : Math.round(v)) + '°', plot.x - 6, y);
+  }
+
+  // series
+  g.save();
+  g.beginPath(); g.rect(plot.x, plot.y, pw, ph); g.clip();
+  g.lineWidth = 1.6; g.lineJoin = 'round';
+  series.forEach((s, idx) => {
+    if (!s.range) return;
+    g.strokeStyle = css.getPropertyValue('--c' + (idx % 4)).trim();
+    g.beginPath();
+    traceSeries(g, s, xOf, yOf, pw);
+    g.stroke();
+  });
+  g.restore();
+
+  // zoom selection
+  if (drag && Math.abs(drag.x1 - drag.x0) > 2) {
+    g.fillStyle = cSel;
+    const x = Math.min(drag.x0, drag.x1);
+    g.fillRect(x, plot.y, Math.abs(drag.x1 - drag.x0), ph);
+  }
+
+  // hover crosshair + tooltip
+  const tip = $('#tip');
+  tip.hidden = true;
+  if (hover !== null && !drag && hover >= plot.x && hover <= plot.x + pw) {
+    const tAt = t0 + (hover - plot.x) / pw * (t1 - t0);
+    const tol = Math.max(GAP_MS, 3 * (t1 - t0) / pw);
+    const rows = [];
+    series.forEach((s, idx) => {
+      if (!s.range) return;
+      let j = lowerBound(s.t, tAt);
+      if (j > 0 && (j === s.t.length || tAt - s.t[j - 1] < s.t[j] - tAt)) j--;
+      if (Math.abs(s.t[j] - tAt) > tol) return;
+      rows.push({ s, idx, t: s.t[j], v: s.v[j] });
+    });
+    g.strokeStyle = cMuted; g.globalAlpha = .6;
+    g.beginPath(); g.moveTo(Math.round(hover) + .5, plot.y); g.lineTo(Math.round(hover) + .5, plot.y + ph); g.stroke();
+    g.globalAlpha = 1;
+    for (const r of rows) {
+      g.fillStyle = css.getPropertyValue('--c' + (r.idx % 4)).trim();
+      g.beginPath(); g.arc(xOf(r.t), yOf(r.v), 4, 0, 6.2832); g.fill();
+    }
+    if (rows.length) showTip(tip, rows, hover, W);
+  }
+}
+
+function traceSeries(g, s, xOf, yOf, pw) {
+  const [a, b] = s.range;
+  const t = s.t, v = s.v;
+  if (b - a <= pw * 2) {                       // sparse enough to draw every point
+    for (let i = a; i < b; i++) {
+      const x = xOf(t[i]), y = yOf(v[i]);
+      if (i === a || t[i] - t[i - 1] > GAP_MS) { g.moveTo(x, y); g.lineTo(x + .1, y); } else g.lineTo(x, y);
+    }
+    return;
+  }
+  // dense: one pixel column at a time, keep first / min / max / last so spikes survive
+  const k = pw / (view.t1 - view.t0);
+  let cur = NaN, first = 0, last = 0, mn = 0, mx = 0, prevT = null;
+  const flush = () => {
+    const idx = [...new Set([first, mn, mx, last])].sort((p, q) => p - q);
+    let lineFrom = prevT !== null && t[idx[0]] - prevT <= GAP_MS;
+    for (const i of idx) {
+      const x = xOf(t[i]), y = yOf(v[i]);
+      if (lineFrom) g.lineTo(x, y); else { g.moveTo(x, y); lineFrom = true; }
+    }
+    prevT = t[last];
+  };
+  for (let i = a; i < b; i++) {
+    const c = Math.floor((t[i] - view.t0) * k);
+    if (c !== cur) {
+      if (!Number.isNaN(cur)) flush();
+      cur = c; first = last = mn = mx = i;
+    } else {
+      last = i;
+      if (v[i] < v[mn]) mn = i;
+      if (v[i] > v[mx]) mx = i;
+    }
+  }
+  if (!Number.isNaN(cur)) flush();
+}
+
+function showTip(tip, rows, px, W) {
+  tip.textContent = '';
+  const head = document.createElement('div');
+  head.className = 't';
+  head.textContent = new Date(rows[0].t).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  tip.appendChild(head);
+  for (const r of rows) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.setProperty('--c', `var(--c${r.idx % 4})`);
+    const sw = document.createElement('span'); sw.className = 'swatch';
+    const txt = document.createElement('span'); txt.textContent = `${r.s.label}: ${r.v.toFixed(1)}°F`;
+    row.append(sw, txt);
+    tip.appendChild(row);
+  }
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  let left = px + 14;
+  if (left + w > W) left = px - w - 14;
+  tip.style.left = Math.max(0, left) + 'px';
+  tip.style.top = (plot.y + 6) + 'px';
+}
+
+// ---------- pointer interaction ----------
+
+function bindPointer() {
+  const cv = $('#chart');
+  const px = (e) => e.clientX - cv.getBoundingClientRect().left;
+  const clampX = (x) => Math.min(plot.x + plot.w, Math.max(plot.x, x));
+
+  cv.addEventListener('pointermove', (e) => {
+    const x = px(e);
+    if (drag) drag.x1 = clampX(x); else hover = x;
+    draw();
+  });
+  cv.addEventListener('pointerleave', () => { hover = null; if (!drag) draw(); });
+  cv.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const x = clampX(px(e));
+    drag = { x0: x, x1: x };
+    cv.setPointerCapture(e.pointerId);
+  });
+  const finish = () => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (Math.abs(d.x1 - d.x0) > 8) {
+      const tAt = (x) => view.t0 + (x - plot.x) / plot.w * (view.t1 - view.t0);
+      let a = tAt(Math.min(d.x0, d.x1)), b = tAt(Math.max(d.x0, d.x1));
+      if (b - a < 3600e3) b = a + 3600e3;
+      view.t0 = a; view.t1 = b; view.live = false;
+      syncUi();
+    }
+    draw();
+  };
+  cv.addEventListener('pointerup', finish);
+  cv.addEventListener('pointercancel', () => { drag = null; draw(); });
+  cv.addEventListener('dblclick', () => setPreset(view.base));
+}
+
+// ---------- startup ----------
+
+async function loadConfig() {
+  for (const name of ['config.local.json', 'config.json']) {
+    try {
+      const r = await fetch(name, { cache: 'no-cache' });
+      if (r.ok) return await r.json();
+    } catch (e) { /* try the next one */ }
+  }
+  throw new Error('config.json not found');
+}
+
+async function main() {
+  try {
+    cfg = await loadConfig();
+  } catch (e) {
+    $('#msg').textContent = 'Could not load config.json: ' + e.message;
+    return;
+  }
+  cfg.dataBase = (cfg.dataBase || '../monitors-data').replace(/\/$/, '');
+  $('#title').textContent = cfg.title || 'Home temperatures';
+  document.title = $('#title').textContent;
+  $('#tz').textContent = 'Times in ' + Intl.DateTimeFormat().resolvedOptions().timeZone;
+  series = (cfg.series || []).map((s) => ({ slug: s.slug, label: s.label || s.slug, hidden: false, t: EMPTY.t, v: EMPTY.v }));
+  buildCards();
+
+  const nav = $('#ranges');
+  for (const [name] of PRESETS) {
+    const b = document.createElement('button');
+    b.textContent = name; b.dataset.p = name;
+    b.addEventListener('click', () => setPreset(name));
+    nav.appendChild(b);
+  }
+  const reset = document.createElement('button');
+  reset.id = 'reset'; reset.textContent = 'Reset zoom'; reset.hidden = true;
+  reset.addEventListener('click', () => setPreset(view.base));
+  nav.appendChild(reset);
+
+  bindPointer();
+  new ResizeObserver(draw).observe($('#wrap'));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  setInterval(refresh, REFRESH_MS);
+
+  await setPreset(DEFAULT_PRESET);
+}
+
+main();
+})();
+</script>
+</body>
+</html>
